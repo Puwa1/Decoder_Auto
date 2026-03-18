@@ -7,6 +7,7 @@ import os
 import datetime
 import csv
 import json
+import re  # <--- [อัปเดต] เพิ่มไลบรารี Regex สำหรับสแกนหา 7E
 from decoder import UniversalJT808Decoder
 
 # ตั้งค่า Theme ของ CustomTkinter
@@ -82,7 +83,6 @@ class ModernApp(ctk.CTk):
     # ==========================================
     def change_theme(self, new_theme: str):
         ctk.set_appearance_mode(new_theme)
-        # ตรวจสอบว่าโหมดปัจจุบันเป็นสว่างหรือมืด
         mode = ctk.get_appearance_mode()
         
         # 1. เปลี่ยนสีของตาราง (Treeview)
@@ -92,7 +92,6 @@ class ModernApp(ctk.CTk):
             self.style.configure("Treeview.Heading", background="#e2e8f0", foreground="#1e293b", relief="flat", font=('Segoe UI', 10, 'bold'))
             self.style.map("Treeview.Heading", background=[('active', '#cbd5e1')])
             
-            # ปรับสีแถว (Tag) สำหรับ Light Mode
             for t in [getattr(self, 'tree_manual', None), getattr(self, 'tree_file', None), getattr(self, 'tree_config', None)]:
                 if t and t.winfo_exists():
                     t.tag_configure('even_row', background='#f8fafc', foreground='#334155')
@@ -103,7 +102,6 @@ class ModernApp(ctk.CTk):
             self.style.configure("Treeview.Heading", background="#3b3b3b", foreground="white", relief="flat", font=('Segoe UI', 10, 'bold'))
             self.style.map("Treeview.Heading", background=[('active', '#4b4b4b')])
             
-            # ปรับสีแถว (Tag) สำหรับ Dark Mode
             for t in [getattr(self, 'tree_manual', None), getattr(self, 'tree_file', None), getattr(self, 'tree_config', None)]:
                 if t and t.winfo_exists():
                     t.tag_configure('even_row', background='#323232', foreground='white')
@@ -112,10 +110,10 @@ class ModernApp(ctk.CTk):
         # 2. เปลี่ยนสีของ System Log Textbox
         if hasattr(self, 'txt_log'):
             if mode == "Light":
-                self.txt_log.tag_config('success', foreground='#15803d') # สีเขียวเข้ม
-                self.txt_log.tag_config('error', foreground='#b91c1c')   # สีแดงเข้ม
-                self.txt_log.tag_config('warning', foreground='#b45309') # สีส้มเข้ม
-                self.txt_log.tag_config('info', foreground='#334155')    # สีเทาเข้ม
+                self.txt_log.tag_config('success', foreground='#15803d') 
+                self.txt_log.tag_config('error', foreground='#b91c1c')   
+                self.txt_log.tag_config('warning', foreground='#b45309') 
+                self.txt_log.tag_config('info', foreground='#334155')    
             else:
                 self.txt_log.tag_config('success', foreground='#4ade80') 
                 self.txt_log.tag_config('error', foreground='#f87171')   
@@ -125,11 +123,10 @@ class ModernApp(ctk.CTk):
         # 3. เปลี่ยนสีของผลลัพธ์ Checksum Textbox
         if hasattr(self, 'chk_result_textbox'):
             if mode == "Light":
-                self.chk_result_textbox.configure(text_color="#047857") # เขียวเข้ม เพื่อให้อ่านง่ายบนพื้นขาว
+                self.chk_result_textbox.configure(text_color="#047857") 
             else:
-                self.chk_result_textbox.configure(text_color="#6ee7b7") # เขียวสว่าง สำหรับพื้นดำ
+                self.chk_result_textbox.configure(text_color="#6ee7b7") 
 
-    # ระบบ Undo/Redo (Ctrl+Z / Ctrl+Y) สำหรับ Textbox
     def apply_undo_redo(self, textbox):
         tb = textbox._textbox
         tb.configure(undo=True, maxundo=-1, autoseparators=True)
@@ -179,7 +176,7 @@ class ModernApp(ctk.CTk):
         btn_bar = ctk.CTkFrame(f_container, fg_color="transparent")
         btn_bar.pack(fill='x', pady=(0, 10))
         ctk.CTkButton(btn_bar, text="⚙️ Change Protocol", command=self.change_protocol_file, fg_color="#64748b", hover_color="#475569").pack(side='left', padx=(0, 10))
-        ctk.CTkButton(btn_bar, text="📂 Load CSV Data", command=self.select_file).pack(side='left', padx=(0, 10))
+        ctk.CTkButton(btn_bar, text="📂 Load Data File (Logs/CSV)", command=self.select_file).pack(side='left', padx=(0, 10))
         ctk.CTkButton(btn_bar, text="🔄 Refresh Data", command=self.refresh_data, fg_color="#0ea5e9", hover_color="#0284c7").pack(side='left', padx=(0, 10))
         ctk.CTkButton(btn_bar, text="💾 Export Report", command=lambda: self.export_data(self.results_df), fg_color="#10b981", hover_color="#059669").pack(side='left')
 
@@ -230,7 +227,6 @@ class ModernApp(ctk.CTk):
         if name == "file": self.tree_file = tree
         else: self.tree_manual = tree
 
-    # --- [ADVANCED COLUMN VISIBILITY MANAGER] ---
     def load_column_prefs(self):
         if os.path.exists(self.column_prefs_file):
             try:
@@ -258,10 +254,8 @@ class ModernApp(ctk.CTk):
     def show_advanced_column_menu(self, event, tree):
         if not self.current_all_columns: return
         
-        # ปรับสีเมนูให้เข้ากับธีม
         bg_col = "#2b2b2b" if ctk.get_appearance_mode() == "Dark" else "#ffffff"
         fg_col = "white" if ctk.get_appearance_mode() == "Dark" else "black"
-        
         menu = tk.Menu(self, tearoff=0, font=('Segoe UI', 10), bg=bg_col, fg=fg_col)
         
         def show_all():
@@ -281,10 +275,8 @@ class ModernApp(ctk.CTk):
 
         menu.add_command(label="👁️ แสดงคอลัมน์ทั้งหมด (Show All)", command=show_all)
         menu.add_separator()
-        
         show_submenu = tk.Menu(menu, tearoff=0, font=('Segoe UI', 10), bg=bg_col, fg=fg_col)
         hide_submenu = tk.Menu(menu, tearoff=0, font=('Segoe UI', 10), bg=bg_col, fg=fg_col)
-        
         menu.add_cascade(label="✅ เลือกโชว์คอลัมน์...", menu=show_submenu)
         menu.add_cascade(label="❌ เลือกซ่อนคอลัมน์...", menu=hide_submenu)
         
@@ -311,7 +303,9 @@ class ModernApp(ctk.CTk):
         self.current_all_columns = final_cols
         
         for t in [getattr(self, 'tree_file', None), getattr(self, 'tree_manual', None)]:
-            if t and t.winfo_exists(): t['columns'] = final_cols
+            if t and t.winfo_exists(): 
+                t['displaycolumns'] = '#all'  
+                t['columns'] = final_cols     
         
         saved_prefs = self.load_column_prefs()
         for col in final_cols:
@@ -394,29 +388,29 @@ class ModernApp(ctk.CTk):
         else:
             if not silent: self.log("⚠️ No file loaded to refresh.", "warning")
 
+    # --- [อัปเดต] ตัวดูด Log อัจฉริยะ (Regex Smart Extractor) ---
     def process_batch_files(self, paths):
         res = []
+        # ค้นหาข้อความที่ขึ้นต้นด้วย 7E และลงท้ายด้วย 7E ความยาวอย่างน้อย 10 ตัวอักษร
+        hex_pattern = re.compile(r'(7E[0-9A-Fa-f]{10,}7E)', re.IGNORECASE)
+        
         for p in paths:
             try:
-                if str(p).lower().endswith('.csv'):
-                    df = pd.read_csv(p)
-                    col = next((c for c in df.columns if c.lower() in ['raw-data','hex','raw']), None)
-                    if col:
-                        for _, r in df.iterrows():
-                            d, _, _ = self.decoder.decode_raw(str(r[col]))
-                            res.extend(d)
-                else:
-                    with open(p, 'r', encoding='utf-8') as f:
-                        for line in f:
-                            if '7E' in line:
-                                d, _, _ = self.decoder.decode_raw(line)
+                # อ่านแบบ Text ธรรมดาไปเลย ไม่ว่าจะเป็น .csv, .txt, .log
+                with open(p, 'r', encoding='utf-8', errors='ignore') as f:
+                    for line in f:
+                        # ค้นหา 7E...7E ทุกจุดที่ซ่อนอยู่ในบรรทัดนั้น
+                        matches = hex_pattern.findall(line)
+                        for match in matches:
+                            d, _, _ = self.decoder.decode_raw(match.upper())
+                            if d:
                                 res.extend(d)
             except Exception as e: 
-                print(f"Error reading file {p}: {e}")
+                self.log(f"Error reading file {os.path.basename(p)}: {e}", "error")
                 
         self.results_df = pd.DataFrame(res)
         self.filtered_df = self.results_df 
-        self.log(f"Batch Processed: {len(res)} rows loaded.", "success")
+        self.log(f"Batch Processed: {len(res)} valid Hex records extracted.", "success")
         self.update_file_table()
 
     def update_file_table(self):
@@ -610,7 +604,6 @@ class ModernApp(ctk.CTk):
             payload = hex_str.upper()
             original_checksum = "N/A"
             
-            # --- อัลกอริทึมตัด Checksum ยืดหยุ่นขั้นเทพ (V2) ---
             if self.chk_remove_7e_var.get():
                 if payload.startswith("7E") and payload.endswith("7E") and len(payload) >= 6:
                     original_checksum = payload[-4:-2] 
