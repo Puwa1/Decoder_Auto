@@ -1,7 +1,6 @@
 import pandas as pd
 import binascii
 import os
-import math
 import re
 
 class UniversalJT808Decoder:
@@ -130,23 +129,120 @@ class UniversalJT808Decoder:
             except: break
         return res, unknown_subs
 
+    def parse_one_msg(self, b_hex, header_info, raw_packet, row_status):
+        res = {}; std_len_hex = 56 
+        if len(b_hex) < std_len_hex: 
+            return {**header_info, 'Raw Hex Block': raw_packet, '_Status': "❌ Incomplete 0200 Block"}
+            
+        standard_hex = b_hex[:std_len_hex]; ext_hex = b_hex[std_len_hex:]
+        unknowns = []
+        
+        if 'Standard_Rules' in self.rules_map:
+            for rule in self.rules_map['Standard_Rules']:
+                try:
+                    s_byte = int(rule.get('StartByte', 0)); l_byte = int(rule.get('Length', 0))
+                    s_idx = s_byte * 2; e_idx = s_idx + (l_byte * 2)
+                    if e_idx <= len(standard_hex):
+                        sub_val = standard_hex[s_idx : e_idx]
+                        res[rule['FieldName']] = self.parse_value(sub_val, rule)
+                except: pass
+        
+        i = 0
+        while i < len(ext_hex):
+            try:
+                if i+4 > len(ext_hex): break
+                eid = ext_hex[i:i+2]; e_len = int(ext_hex[i+2:i+4], 16)
+                if i+4+(e_len*2) > len(ext_hex): break
+                e_val = ext_hex[i+4 : i+4+(e_len*2)]
+                
+                if eid in self.container_ids: 
+                    sub_res, unk_subs = self.parse_sub_tlv(e_val, eid)
+                    res.update(sub_res)
+                    unknowns.extend(unk_subs)
+                else:
+                    key = f"Main_{eid.upper()}"
+                    if key in self.rules_map:
+                        for rule in self.rules_map[key]:
+                            try:
+                                s_byte = int(rule.get('StartByte', 0)); l_byte = int(rule.get('Length', 0))
+                                if l_byte == 0: l_byte = len(e_val) // 2
+                                s_idx = s_byte * 2; e_idx = s_idx + (l_byte * 2)
+                                if e_idx > len(e_val): e_idx = len(e_val)
+                                if s_idx < len(e_val):
+                                    sub_val = e_val[s_idx : e_idx]
+                                    res[rule['FieldName']] = self.parse_value(sub_val, rule)
+                            except: pass
+                    else:
+                        if eid != "00" or e_val.replace("0", "") != "":
+                            unknowns.append(f"Main:{eid}({e_val})")
+                i += 4 + (e_len * 2)
+            except: break
+
+        for rule in self.calculated_rules:
+            try:
+                target_col = rule['FieldName']
+                ref_col = rule.get('RefField', 'Status')
+                bit_idx = int(rule['BitIndex'])
+                if ref_col in res:
+                    parent_val = int(float(res[ref_col]))
+                    bit_val = (parent_val >> bit_idx) & 1
+                    
+                    t0 = str(rule.get('Text0', '')).strip()
+                    t1 = str(rule.get('Text1', '')).strip()
+                    if t0 == '' and t1 == '':
+                        t0, t1 = "OFF", "ON"
+                        
+                    res[target_col] = t1 if bit_val == 1 else t0
+                else: res[target_col] = "-"
+            except: res[target_col] = "ERR"
+            
+        if unknowns:
+            res['Unknown_Tags'] = " | ".join(unknowns)
+
+        return {**header_info, **res, 'Raw Hex Block': raw_packet, '_Status': row_status}
+
+    def process_0704_block(self, body_hex, header_info, raw_packet, row_status):
+        items = []
+        if len(body_hex) < 6: return items
+        
+        count = int(body_hex[0:4], 16)
+        idx = 6
+        
+        for _ in range(count):
+            if idx + 4 > len(body_hex): break
+            
+            block_len = int(body_hex[idx:idx+4], 16)
+            data_start = idx + 4
+            data_end = data_start + (block_len * 2)
+            
+            if data_end > len(body_hex):
+                block_data = body_hex[data_start:]
+                idx = len(body_hex)
+            else:
+                block_data = body_hex[data_start:data_end]
+                idx = data_end
+            
+            if len(block_data) >= 56:
+                items.append(self.parse_one_msg(block_data, header_info, raw_packet, row_status))
+            
+        return items
+
     def decode_raw(self, raw_hex):
         try:
             raw_str = str(raw_hex).upper().replace("\n", "").replace("\r", "").replace(" ", "")
             hex_blocks = re.findall(r'7E[0-9A-F]{10,}7E', raw_str)
             
             if not hex_blocks:
-                return [{'Message ID': 'HEX ERR', '_Status': "❌ No valid JT808 packet found", 'Raw Hex Block': raw_str[:100]}], "Error", 0
+                if len(raw_str) > 20: hex_blocks = [raw_str]
+                else: return [{'Message ID': 'HEX ERR', '_Status': "❌ No valid JT808 packet found", 'Raw Hex Block': raw_str[:100]}], "Error", 0
 
             all_decoded_list = []
             final_status = "OK"
             final_mid = 0
 
             for block in hex_blocks:
-                try:
-                    raw_bytes = bytes.fromhex(block)
-                except ValueError:
-                    continue 
+                try: raw_bytes = bytes.fromhex(block)
+                except ValueError: continue 
                     
                 chunks = raw_bytes.split(b'\x7e')
                 packets = []
@@ -155,45 +251,31 @@ class UniversalJT808Decoder:
                 known_msg_ids = {0x0001, 0x0100, 0x0102, 0x0200, 0x0201, 0x0704, 0x0705, 0x0801, 0x0805, 0x0900, 0x8001, 0x8100}
                 
                 for chunk in chunks:
-                    if not chunk:
-                        continue
-                        
+                    if not chunk: continue
                     is_new_packet = False
                     if len(chunk) >= 12:
                         msg_id = (chunk[0] << 8) | chunk[1]
-                        if msg_id in known_msg_ids:
-                            is_new_packet = True
+                        if msg_id in known_msg_ids: is_new_packet = True
                             
                     if is_new_packet:
-                        if current_packet:
-                            packets.append(current_packet)
+                        if current_packet: packets.append(current_packet)
                         current_packet = chunk
                     else:
-                        if current_packet:
-                            current_packet += b'\x7e' + chunk
-                        else:
-                            current_packet = chunk
+                        if current_packet: current_packet += b'\x7e' + chunk
+                        else: current_packet = chunk
                             
-                if current_packet:
-                    packets.append(current_packet)
+                if current_packet: packets.append(current_packet)
 
                 for p_bytes in packets:
                     p_hex = p_bytes.hex().upper()
-                    packet_hex = "7E" + p_hex + "7E"
+                    packet_hex = "7E" + p_hex + "7E" if not p_hex.startswith("7E") else p_hex
                     
                     data_str = self.unescape(p_hex)
-                    try:
-                        data_bytes = bytes.fromhex(data_str)
-                    except: 
-                        all_decoded_list.append({'Message ID': 'HEX ERR', '_Status': "❌ Invalid Hex", 'Raw Hex Block': packet_hex})
-                        continue
+                    try: data_bytes = bytes.fromhex(data_str)
+                    except: continue
                         
-                    # ป้องกันการ Error ถ้าข้อมูลสั้นเกินไป
-                    if len(data_str) < 24:
-                        all_decoded_list.append({'Message ID': '?', '_Status': "❌ Packet Too Short", 'Raw Hex Block': packet_hex})
-                        continue
+                    if len(data_str) < 24: continue
 
-                    # [🔥 NEW] ถ้า Checksum พัง แค่แจ้งเตือน แต่ให้อภัยแล้วดึงข้อมูลต่อ!
                     row_status = "OK"
                     if not self.verify_checksum(data_bytes): 
                         row_status = "⚠️ Bad Checksum (Parsed)"
@@ -210,7 +292,8 @@ class UniversalJT808Decoder:
                         })
                         continue
 
-                    body_attr = int(data[4:8], 16); is_2019 = (body_attr >> 14) & 1
+                    body_attr = int(data[4:8], 16)
+                    is_2019 = (body_attr >> 14) & 1
                     
                     header = {}
                     header[self.get_header_name('MsgID', 'Message ID')] = f"0x{data[0:4]}"
@@ -227,87 +310,21 @@ class UniversalJT808Decoder:
                         header[self.get_header_name('TermID', 'CCID')] = data[8:20]
                         header[self.get_header_name('TrackCount', 'Count Up Track')] = int(data[20:24], 16)
                         body_start = 24
+                        
                     if (body_attr >> 13) & 1: body_start += 8
 
-                    def parse_one_msg(b_hex):
-                        res = {}; std_len_hex = 56 
-                        standard_hex = b_hex[:std_len_hex]; ext_hex = b_hex[std_len_hex:]
-                        unknowns = []
-                        
-                        if 'Standard_Rules' in self.rules_map:
-                            for rule in self.rules_map['Standard_Rules']:
-                                try:
-                                    s_byte = int(rule.get('StartByte', 0)); l_byte = int(rule.get('Length', 0))
-                                    s_idx = s_byte * 2; e_idx = s_idx + (l_byte * 2)
-                                    if e_idx <= len(standard_hex):
-                                        sub_val = standard_hex[s_idx : e_idx]
-                                        res[rule['FieldName']] = self.parse_value(sub_val, rule)
-                                except: pass
-                        
-                        i = 0
-                        while i < len(ext_hex):
-                            try:
-                                if i+4 > len(ext_hex): break
-                                eid = ext_hex[i:i+2]; e_len = int(ext_hex[i+2:i+4], 16)
-                                if i+4+(e_len*2) > len(ext_hex): break
-                                e_val = ext_hex[i+4 : i+4+(e_len*2)]
-                                
-                                if eid in self.container_ids: 
-                                    sub_res, unk_subs = self.parse_sub_tlv(e_val, eid)
-                                    res.update(sub_res)
-                                    unknowns.extend(unk_subs)
-                                else:
-                                    key = f"Main_{eid.upper()}"
-                                    if key in self.rules_map:
-                                        for rule in self.rules_map[key]:
-                                            try:
-                                                s_byte = int(rule.get('StartByte', 0)); l_byte = int(rule.get('Length', 0))
-                                                if l_byte == 0: l_byte = len(e_val) // 2
-                                                s_idx = s_byte * 2; e_idx = s_idx + (l_byte * 2)
-                                                if e_idx > len(e_val): e_idx = len(e_val)
-                                                if s_idx < len(e_val):
-                                                    sub_val = e_val[s_idx : e_idx]
-                                                    res[rule['FieldName']] = self.parse_value(sub_val, rule)
-                                            except: pass
-                                    else:
-                                        unknowns.append(f"Main:{eid}({e_val})")
-                                i += 4 + (e_len * 2)
-                            except: break
-
-                        for rule in self.calculated_rules:
-                            try:
-                                target_col = rule['FieldName']
-                                ref_col = rule.get('RefField', 'Status')
-                                bit_idx = int(rule['BitIndex'])
-                                if ref_col in res:
-                                    parent_val = int(float(res[ref_col]))
-                                    bit_val = (parent_val >> bit_idx) & 1
-                                    
-                                    t0 = str(rule.get('Text0', '')).strip()
-                                    t1 = str(rule.get('Text1', '')).strip()
-                                    if t0 == '' and t1 == '':
-                                        t0, t1 = "OFF", "ON"
-                                        
-                                    res[target_col] = t1 if bit_val == 1 else t0
-                                else: res[target_col] = "-"
-                            except: res[target_col] = "ERR"
-                            
-                        if unknowns:
-                            res['Unknown_Tags'] = " | ".join(unknowns)
-
-                        return {**header, **res, 'Raw Hex Block': packet_hex, '_Status': row_status}
-
                     body_hex = data[body_start:-2]
+                    
                     if mid == 0x0704:
-                        try:
-                            count = int(body_hex[0:4], 16); curr = 6
-                            for _ in range(count):
-                                l_len = int(body_hex[curr:curr+4], 16)
-                                all_decoded_list.append(parse_one_msg(body_hex[curr+4 : curr+4+(l_len*2)]))
-                                curr += 4 + (l_len*2)
-                        except: all_decoded_list.append(parse_one_msg(body_hex))
+                        blocks = self.process_0704_block(body_hex, header, packet_hex, row_status)
+                        if blocks:
+                            all_decoded_list.extend(blocks)
+                        else:
+                            # [🔥 แก้ไข] ถ้ามันเป็นแพ็กเกจ 0704 เปล่าๆ (Count=0) ให้โชว์ข้อมูล Header แทน
+                            status_msg = row_status if row_status != "OK" else "✅ OK (Empty 0704 Batch)"
+                            all_decoded_list.append({**header, 'Raw Hex Block': packet_hex, '_Status': status_msg})
                     else: 
-                        all_decoded_list.append(parse_one_msg(body_hex))
+                        all_decoded_list.append(self.parse_one_msg(body_hex, header, packet_hex, row_status))
             
             if not all_decoded_list:
                 return [{'Message ID': 'HEX ERR', '_Status': "❌ No valid JT808 packet found", 'Raw Hex Block': raw_str[:100]}], "Error", 0
