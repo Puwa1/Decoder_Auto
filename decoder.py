@@ -129,14 +129,89 @@ class UniversalJT808Decoder:
             except: break
         return res, unknown_subs
 
+    def parse_bsj_extension(self, ext_hex, parent_id):
+        res = {}
+        idx = 0
+        limit = len(ext_hex)
+        
+        # ถอดรหัสฮาร์ดแวร์พิเศษตามคู่มือ BSJ
+        bsj_dict = {
+            '00B2': ('BSJ_SIM_ICCID', 'STRING', 1),
+            '0089': ('BSJ_Ext_Alarm_1', 'HEX', 1),
+            '00FB': ('BSJ_Lock_SIM_Status', 'HEX', 1),
+            '00D8': ('BSJ_4G_LBS_Station', 'HEX', 1),
+            '00C5': ('BSJ_Ext_Alarm_2', 'HEX', 1),
+            '002D': ('BSJ_Ext_Voltage_V', 'INT', 1000), 
+            '00D5': ('BSJ_IMEI', 'STRING', 1),
+            '0110': ('BSJ_Sensor_0110', 'HEX', 1),
+            '0113': ('BSJ_Firmware_Ver', 'STRING', 1),
+            '0114': ('BSJ_Sys_Config', 'STRING', 1),
+            '0116': ('BSJ_Sys_Status', 'HEX', 1)
+        }
+        
+        while idx < limit:
+            try:
+                if idx + 4 > limit: break
+                length_val = int(ext_hex[idx:idx+4], 16)
+                if idx + 8 > limit: break
+                sub_id = ext_hex[idx+4:idx+8].upper()
+                
+                data_len_chars = (length_val - 2) * 2
+                data_start = idx + 8
+                
+                if data_start + data_len_chars > limit:
+                    data_len_chars = limit - data_start
+                    
+                val_hex = ext_hex[data_start : data_start + data_len_chars]
+                
+                key = f"Sub_{sub_id}"
+                if key in self.rules_map:
+                    for rule in self.rules_map[key]:
+                        try:
+                            s_byte = int(rule.get('StartByte', 0)); l_byte = int(rule.get('Length', 0))
+                            if l_byte == 0: l_byte = len(val_hex) // 2
+                            s_idx = s_byte * 2; e_idx = s_idx + (l_byte * 2)
+                            if e_idx > len(val_hex): e_idx = len(val_hex)
+                            if s_idx < len(val_hex):
+                                sub_val = val_hex[s_idx : e_idx]
+                                res[rule['FieldName']] = self.parse_value(sub_val, rule)
+                        except: pass
+                else:
+                    if sub_id in bsj_dict:
+                        name, dtype, scale = bsj_dict[sub_id]
+                        rule = {'DataType': dtype, 'Scale': scale}
+                        res[name] = self.parse_value(val_hex, rule)
+                    else:
+                        res[f"BSJ_{parent_id}_{sub_id}"] = val_hex
+                        
+                idx += 4 + (length_val * 2)
+            except: break
+        return res
+
     def parse_one_msg(self, b_hex, header_info, raw_packet, row_status):
         res = {}; std_len_hex = 56 
         if len(b_hex) < std_len_hex: 
             return {**header_info, 'Raw Hex Block': raw_packet, '_Status': "❌ Incomplete 0200 Block"}
             
-        standard_hex = b_hex[:std_len_hex]; ext_hex = b_hex[std_len_hex:]
-        unknowns = []
+        standard_hex = b_hex[:std_len_hex]
+        ext_hex = b_hex[std_len_hex:]
         
+        # --- เจาะเกราะ BSJ (ค้นหา 0200 ที่ซ่อนอยู่ใน Tag 00) ---
+        e_idx = 0
+        while e_idx < len(ext_hex):
+            if e_idx+4 > len(ext_hex): break
+            eid = ext_hex[e_idx:e_idx+2]
+            e_len = int(ext_hex[e_idx+2:e_idx+4], 16)
+            
+            # ถ้าเจอ Tag 00 ที่ใหญ่พอจะเป็นพิกัด ให้แปลค่านั้นแทนแล้วข้ามเปลือกขยะไปเลย!
+            if eid == '00' and e_len >= 28 and e_idx+4+(e_len*2) <= len(ext_hex):
+                nested_payload = ext_hex[e_idx+4 : e_idx+4+(e_len*2)]
+                return self.parse_one_msg(nested_payload, header_info, raw_packet, row_status)
+                
+            e_idx += 4 + (e_len * 2)
+        # ----------------------------------------------------
+
+        unknowns = []
         if 'Standard_Rules' in self.rules_map:
             for rule in self.rules_map['Standard_Rules']:
                 try:
@@ -155,6 +230,12 @@ class UniversalJT808Decoder:
                 if i+4+(e_len*2) > len(ext_hex): break
                 e_val = ext_hex[i+4 : i+4+(e_len*2)]
                 
+                if eid in ['EB', 'EC', 'ED']:
+                    bsj_res = self.parse_bsj_extension(e_val, eid)
+                    res.update(bsj_res)
+                    i += 4 + (e_len * 2)
+                    continue
+
                 if eid in self.container_ids: 
                     sub_res, unk_subs = self.parse_sub_tlv(e_val, eid)
                     res.update(sub_res)
@@ -320,7 +401,6 @@ class UniversalJT808Decoder:
                         if blocks:
                             all_decoded_list.extend(blocks)
                         else:
-                            # [🔥 แก้ไข] ถ้ามันเป็นแพ็กเกจ 0704 เปล่าๆ (Count=0) ให้โชว์ข้อมูล Header แทน
                             status_msg = row_status if row_status != "OK" else "✅ OK (Empty 0704 Batch)"
                             all_decoded_list.append({**header, 'Raw Hex Block': packet_hex, '_Status': status_msg})
                     else: 

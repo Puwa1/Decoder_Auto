@@ -20,7 +20,7 @@ ctk.set_default_color_theme("blue")
 class ModernApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("GPS Decoder Pro (Ultimate CTk)")
+        self.title("GPS Decoder")
         self.geometry("1450x900")
 
         # --- HEADER (THEME SWITCHER) ---
@@ -451,28 +451,59 @@ class ModernApp(ctk.CTk):
             messagebox.showwarning("คำเตือน", "ไม่มีข้อมูลให้ Export ครับ")
             return
             
+        # --- 1. ถามผู้ใช้ว่าต้องการเซฟข้อมูลรูปแบบไหน ---
+        export_mode = messagebox.askyesnocancel(
+            "เลือกรูปแบบการบันทึกข้อมูล", 
+            "กรุณาเลือกรูปแบบการเซฟไฟล์:\n\n"
+            "[Yes] = บันทึก 'ทั้งหมด' (รวมข้อมูลที่ Error/พัง ไว้ตรวจสอบ)\n"
+            "[No] = บันทึก 'เฉพาะที่สมบูรณ์' (กรองข้อมูล Error ทิ้ง เอาไปใช้ต่อ)"
+        )
+        
+        if export_mode is None: # ถ้ากด Cancel ให้ยกเลิกการเซฟ
+            return
+            
+        export_df = target_df.copy()
+        
+        # --- 2. ถ้าผู้ใช้กด No ให้กรองเอาเฉพาะข้อมูลที่ OK ---
+        if not export_mode:
+            # คัดกรองแถวที่มีคำว่า OK ในคอลัมน์ _Status
+            export_df = export_df[export_df['_Status'].astype(str).str.contains('OK', case=False, na=False)]
+            if export_df.empty:
+                messagebox.showinfo("ข้อมูลว่างเปล่า", "ไม่มีข้อมูลที่ 'ถูกต้องสมบูรณ์' ให้บันทึกครับ!\n(ข้อมูลทั้งหมดอาจจะมีแต่ Error)")
+                return
+                
+        # --- 3. เลือกที่เก็บไฟล์ ---
         file_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel File", "*.xlsx"), ("CSV File", "*.csv")])
         if not file_path: return
+        
         try:
-            export_df = target_df.copy()
+            # --- 4. จัดรูปแบบคอลัมน์ ---
             non_empty = [c for c in export_df.columns if export_df[c].astype(str).str.strip().ne('').any()]
             keep = [c for c in self.decoder.all_field_names if c in non_empty]
             keep.extend([c for c in non_empty if c not in keep])
             export_df = export_df[keep]
 
+            # เลือกเฉพาะคอลัมน์ที่โชว์อยู่บนหน้าจอ (ถ้าซ่อนไว้ก็ไม่ต้อง Export)
             visible_cols = [col for col in self.current_all_columns if self.column_visibility_vars.get(col, tk.BooleanVar(value=True)).get()]
             if visible_cols: export_df = export_df[[c for c in visible_cols if c in export_df.columns]]
 
-            for col in ['Device IMEI', 'Terminal ID', 'CCID', 'BSJ Serial No', 'Mobile Network Operator', 'Serial Number']:
-                if col in export_df.columns: export_df[col] = export_df[col].astype(str)
+            # ป้องกัน Excel แปลงตัวเลขยาวๆ เป็นสัญกรณ์วิทยาศาสตร์ (E+)
+            for col in ['Device IMEI', 'Terminal ID', 'CCID', 'BSJ_SIM_ICCID', 'BSJ_IMEI', 'Phone Number']:
+                if col in export_df.columns: 
+                    export_df[col] = export_df[col].astype(str)
 
+            # --- 5. บันทึกไฟล์ลงเครื่อง ---
             if file_path.lower().endswith('.csv'):
                 export_df.to_csv(file_path, index=False, encoding='utf-8-sig', quoting=csv.QUOTE_ALL)
-                self.log(f"Saved CSV: {os.path.basename(file_path)}", "success")
+                self.log(f"Saved CSV (Mode: {'ALL DATA' if export_mode else 'VALID ONLY'}): {os.path.basename(file_path)}", "success")
             else:
                 export_df.to_excel(file_path, index=False)
-                self.log(f"Saved Excel: {os.path.basename(file_path)}", "success")
-        except Exception as e: self.log(f"Export Error: {e}", "error")
+                self.log(f"Saved Excel (Mode: {'ALL DATA' if export_mode else 'VALID ONLY'}): {os.path.basename(file_path)}", "success")
+                
+            messagebox.showinfo("สำเร็จ", f"บันทึกข้อมูลเรียบร้อยแล้ว!\n(รูปแบบ: {'ทั้งหมด' if export_mode else 'เฉพาะที่สมบูรณ์'})")
+        except Exception as e: 
+            self.log(f"Export Error: {e}", "error")
+            messagebox.showerror("ข้อผิดพลาด", f"ไม่สามารถบันทึกไฟล์ได้:\n{e}")
 
     # ==========================
     # --- CHECKSUM TOOL TAB ---
